@@ -42,6 +42,38 @@ FastGS is a **general acceleration framework** that supercharges 3D Gaussian Spl
 | Memory Usage | ✅ **Low Footprint** | ❌ High Demand |
 | Task Versatility | ✅ **6 Domains** | ❌ Limited Scope |
 
+## Setup
+```bash
+conda env create --file environment.yaml
+conda activate FastGS
+```
+
+## Usage
+Clone the repository
+```bash
+git clone https://github.com/fastgs/FastGS.git --recursive
+```
+## Training
+```bash
+bash train_base.sh
+```
+or
+```bash
+bash train_big.sh
+```
+
+
+## Citation
+If you find this repo useful, please cite:
+```
+@article{ren2025fastgs,
+  title={FastGS: Training 3D Gaussian Splatting in 100 Seconds},
+  author={Ren, Shiwei and Wen, Tianci and Fang, Yongchun and Lu, Biao},
+  journal={arXiv preprint arXiv:2511.04283},
+  year={2025}
+}
+
+```
 
 ---
 
@@ -56,8 +88,3 @@ FastGS is a **general acceleration framework** that supercharges 3D Gaussian Spl
 ---
 
 *Note: This is a preview README. Full documentation and code examples will be available upon release.*
-
-<!--
-**fastgs/FastGS** is a ✨ _special_ ✨ repository because its `README.md` (this file) appears on your GitHub profile.
-
--->
