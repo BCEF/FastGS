@@ -78,7 +78,7 @@ class Scene:
             self.gaussians.load_ply(args.init_ply_path)
             self.gaussians.fixup_params(self.cameras_extent)
             self.gaussians.load_prev_attrs_from_ply(args.init_ply_path)
-        if self.loaded_iter:
+        elif self.loaded_iter:
             self.gaussians.load_ply(os.path.join(self.model_path,
                                                            "point_cloud",
                                                            "iteration_" + str(self.loaded_iter),

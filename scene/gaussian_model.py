@@ -394,6 +394,9 @@ class GaussianModel:
         # SUMO: 更新前一帧属性和边索引
         if self._prev_xyz is not None:
             N = self._prev_xyz.shape[0]
+            print(f"_prev_xyz shape:{N}")
+            # print(f"valid_points_mask shape:{valid_points_mask.shape[0]}")
+
             self._prev_xyz = self._prev_xyz[valid_points_mask[:N]]
             self._prev_rotation = self._prev_rotation[valid_points_mask[:N]]
             self._prev_scaling = self._prev_scaling[valid_points_mask[:N]]
@@ -535,7 +538,9 @@ class GaussianModel:
         metric_mask = importance_score > 5
 
         self.densify_and_clone_fastgs(metric_mask, all_clones)
+        # print(f"before split points num: {self.get_xyz.shape[0]}")
         self.densify_and_split_fastgs(metric_mask, all_splits)
+        # print(f"after split points num: {self.get_xyz.shape[0]}")
 
         prune_mask = (self.get_opacity < min_opacity).squeeze()
         if max_screen_size:
@@ -556,7 +561,9 @@ class GaussianModel:
             sampled_indices = torch.multinomial(padded_importance, remove_budget, replacement=False)
             selected_pts_mask[sampled_indices] = True
             final_prune = torch.logical_and(prune_mask, selected_pts_mask)
+            # print(f"before remove points num: {self.get_xyz.shape[0]}")
             self.prune_points(final_prune)
+            # print(f"after remove points num: {self.get_xyz.shape[0]}")
         
         opacities_new = inverse_sigmoid(torch.min(self.get_opacity, torch.ones_like(self.get_opacity)*0.8))
         optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
@@ -578,7 +585,10 @@ class GaussianModel:
         prune_mask = (self.get_opacity < min_opacity).squeeze() 
         scores_mask = pruning_score > 0.9
         final_prune = torch.logical_or(prune_mask, scores_mask)
+
+        # print(f"Final pruning: removing {final_prune.sum().item()} Gaussians out of {self.get_xyz.shape[0]}")
         self.prune_points(final_prune)
+
 
     # ==================== SUMO: 前一帧约束相关方法 ====================
     def fixup_params(self,spatial_lr_scale : float):
