@@ -26,6 +26,8 @@ try:
 except:
     pass
 
+from sklearn.neighbors import NearestNeighbors  # SUMO
+
 class GaussianModel:
 
     def setup_functions(self):
@@ -69,6 +71,15 @@ class GaussianModel:
         self.percent_dense = 0
         self.spatial_lr_scale = 0
         self.setup_functions()
+
+        # SUMO: 前一帧属性存储
+        self._prev_xyz = None
+        self._prev_rotation = None
+        self._prev_scaling = None
+        self._prev_opacity = None
+        self._prev_features_dc = None
+        self._prev_features_rest = None
+        self._edge_indices = None
 
     def capture(self, optimizer_type):
         if optimizer_type == "default":
@@ -380,6 +391,36 @@ class GaussianModel:
         if self.tmp_radii is not None:
             self.tmp_radii = self.tmp_radii[valid_points_mask]
 
+        # SUMO: 更新前一帧属性和边索引
+        if self._prev_xyz is not None:
+            N = self._prev_xyz.shape[0]
+            self._prev_xyz = self._prev_xyz[valid_points_mask[:N]]
+            self._prev_rotation = self._prev_rotation[valid_points_mask[:N]]
+            self._prev_scaling = self._prev_scaling[valid_points_mask[:N]]
+            self._prev_opacity = self._prev_opacity[valid_points_mask[:N]]
+            self._prev_features_dc = self._prev_features_dc[valid_points_mask[:N]]
+            self._prev_features_rest = self._prev_features_rest[valid_points_mask[:N]]
+
+            # SUMO: 更新边索引映射
+            if self._edge_indices is not None and self._edge_indices.shape[1] > 0:
+                original_indices = torch.arange(N, device="cuda")
+                retained_indices = original_indices[valid_points_mask[:N]]
+                old_to_new = torch.full((N,), -1, dtype=torch.long, device="cuda")
+                old_to_new[retained_indices] = torch.arange(retained_indices.shape[0], device="cuda")
+                
+                old_indices_i = self._edge_indices[0]
+                old_indices_j = self._edge_indices[1]
+
+                new_indices_i = old_to_new[old_indices_i]
+                new_indices_j = old_to_new[old_indices_j]
+
+                valid_edge_mask = (new_indices_i != -1) & (new_indices_j != -1)
+
+                new_indices_i = new_indices_i[valid_edge_mask]
+                new_indices_j = new_indices_j[valid_edge_mask]
+
+                self._edge_indices = torch.stack((new_indices_i, new_indices_j), dim=0)
+
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
         optimizers = [self.optimizer]
@@ -538,3 +579,114 @@ class GaussianModel:
         scores_mask = pruning_score > 0.9
         final_prune = torch.logical_or(prune_mask, scores_mask)
         self.prune_points(final_prune)
+
+    # ==================== SUMO: 前一帧约束相关方法 ====================
+
+    def build_knn_graph(self, k=4):
+        """构建 KNN 图用于时间平滑约束"""
+        points = self.get_xyz.detach().cpu().numpy()
+        nbrs = NearestNeighbors(n_neighbors=k+1).fit(points)
+        _, indices = nbrs.kneighbors(points)
+
+        edge_dict = {}
+        for i, neighbors in enumerate(indices):
+            for j in neighbors[1:]:  # 跳过自身
+                edge_dict.setdefault(i, set()).add(j)
+                edge_dict.setdefault(j, set()).add(i)
+        
+        # 预处理边为索引对
+        edge_pairs = []
+        for i, neighbors in edge_dict.items():
+            if neighbors:
+                edge_pairs.extend([(i, j) for j in neighbors])
+        
+        if not edge_pairs:
+            self._edge_indices = torch.tensor([[], []], dtype=torch.long, device="cuda")
+            return
+        
+        indices_i, indices_j = zip(*edge_pairs)
+        indices_i = torch.tensor([int(i) for i in indices_i], dtype=torch.long, device="cuda")
+        indices_j = torch.tensor([int(j) for j in indices_j], dtype=torch.long, device="cuda")
+
+        self._edge_indices = torch.stack((indices_i, indices_j), dim=0)
+
+    def load_prev_attrs_from_ply(self, path):
+        """从 PLY 文件加载前一帧的属性"""
+        plydata = PlyData.read(path)
+
+        xyz = np.stack((np.asarray(plydata.elements[0]["x"]),
+                        np.asarray(plydata.elements[0]["y"]),
+                        np.asarray(plydata.elements[0]["z"])), axis=1)
+        opacities = np.asarray(plydata.elements[0]["opacity"])[..., np.newaxis]
+
+        features_dc = np.zeros((xyz.shape[0], 3, 1))
+        features_dc[:, 0, 0] = np.asarray(plydata.elements[0]["f_dc_0"])
+        features_dc[:, 1, 0] = np.asarray(plydata.elements[0]["f_dc_1"])
+        features_dc[:, 2, 0] = np.asarray(plydata.elements[0]["f_dc_2"])
+
+        extra_f_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("f_rest_")]
+        extra_f_names = sorted(extra_f_names, key=lambda x: int(x.split('_')[-1]))
+        assert len(extra_f_names) == 3 * (self.max_sh_degree + 1) ** 2 - 3
+        features_extra = np.zeros((xyz.shape[0], len(extra_f_names)))
+        for idx, attr_name in enumerate(extra_f_names):
+            features_extra[:, idx] = np.asarray(plydata.elements[0][attr_name])
+        features_extra = features_extra.reshape((features_extra.shape[0], 3, (self.max_sh_degree + 1) ** 2 - 1))
+
+        scale_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("scale_")]
+        scale_names = sorted(scale_names, key=lambda x: int(x.split('_')[-1]))
+        scales = np.zeros((xyz.shape[0], len(scale_names)))
+        for idx, attr_name in enumerate(scale_names):
+            scales[:, idx] = np.asarray(plydata.elements[0][attr_name])
+
+        rot_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("rot")]
+        rot_names = sorted(rot_names, key=lambda x: int(x.split('_')[-1]))
+        rots = np.zeros((xyz.shape[0], len(rot_names)))
+        for idx, attr_name in enumerate(rot_names):
+            rots[:, idx] = np.asarray(plydata.elements[0][attr_name])
+
+        self._prev_xyz = torch.tensor(xyz, dtype=torch.float, device="cuda")
+        self._prev_features_dc = torch.tensor(features_dc, dtype=torch.float, device="cuda").transpose(1, 2).contiguous()
+        self._prev_features_rest = torch.tensor(features_extra, dtype=torch.float, device="cuda").transpose(1, 2).contiguous()
+        self._prev_opacity = torch.tensor(opacities, dtype=torch.float, device="cuda")
+        self._prev_scaling = torch.tensor(scales, dtype=torch.float, device="cuda")
+        self._prev_rotation = torch.tensor(rots, dtype=torch.float, device="cuda")
+
+    def get_gaussian_attributes(self):
+        """获取当前帧高斯属性"""
+        return {
+            "xyz": self._xyz,
+            "rotation": self._rotation,
+            "scaling": self._scaling,
+            "opacity": self._opacity,
+            "features_dc": self._features_dc,
+            "features_rest": self._features_rest
+        }
+
+    def get_prev_gaussian_attributes(self):
+        """获取前一帧高斯属性"""
+        return {
+            "xyz": self._prev_xyz,
+            "rotation": self._prev_rotation,
+            "scaling": self._prev_scaling,
+            "opacity": self._prev_opacity,
+            "features_dc": self._prev_features_dc,
+            "features_rest": self._prev_features_rest
+        }
+
+    def get_edge_indices(self):
+        """获取边索引用于平滑约束"""
+        return self._edge_indices
+
+    def has_prev_frame(self):
+        """检查是否有前一帧数据"""
+        return self._prev_xyz is not None
+
+    def clear_prev_frame(self):
+        """清除前一帧数据"""
+        self._prev_xyz = None
+        self._prev_rotation = None
+        self._prev_scaling = None
+        self._prev_opacity = None
+        self._prev_features_dc = None
+        self._prev_features_rest = None
+        self._edge_indices = None
