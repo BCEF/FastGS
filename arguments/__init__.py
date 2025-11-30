@@ -123,7 +123,7 @@ class OptimizationParams(ParamGroup):
         self.alpha_temp = 10.0     # 时间正则化的自适应权重系数
         
         # 新增平滑正则化参数
-        self.lambda_smooth = 100  # 平滑正则化权重
+        self.lambda_smooth = 100.0  # 平滑正则化权重
         self.alpha_smooth = 5.0    # 平滑正则化的自适应权重系数
         super().__init__(parser, "Optimization Parameters")
 

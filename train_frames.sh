@@ -17,7 +17,7 @@ GPU_ID=0
 
 # 图像文件夹和分辨率
 IMAGES="images"
-RESOLUTION=1
+RESOLUTION=4
 
 # FastGS 基础参数
 ITERATIONS=30000
@@ -43,7 +43,7 @@ ALPHA_TEMP=0.5
 ALPHA_SMOOTH=0.5
 
 # ============ SIBR Viewer 实时查看设置 ============
-ENABLE_VIEWER=true         # 是否启用实时查看
+ENABLE_VIEWER=false         # 是否启用实时查看
 VIEWER_IP="127.0.0.1"
 VIEWER_PORT=6009
 

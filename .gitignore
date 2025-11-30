@@ -1,2 +1,3 @@
 submodules/
 *.pyc
+move_sparse_files.py
