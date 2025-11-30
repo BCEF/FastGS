@@ -54,6 +54,12 @@ class ModelParams(ParamGroup):
         self._white_background = False
         self.data_device = "cuda"
         self.eval = False
+
+        #SUMO
+        self.use_reg=False
+        self.use_init_ply=True
+        self.init_ply_path="null"
+
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
@@ -110,6 +116,15 @@ class OptimizationParams(ParamGroup):
 
         self.random_background = False
         self.optimizer_type = "default"
+
+        #SUMO
+        # 新增时间正则化参数
+        self.lambda_temp = 10.0   # 时间正则化权重
+        self.alpha_temp = 10.0     # 时间正则化的自适应权重系数
+        
+        # 新增平滑正则化参数
+        self.lambda_smooth = 100  # 平滑正则化权重
+        self.alpha_smooth = 5.0    # 平滑正则化的自适应权重系数
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser : ArgumentParser):

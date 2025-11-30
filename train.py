@@ -25,6 +25,7 @@ from tqdm import tqdm
 from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
+
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
@@ -33,6 +34,8 @@ except ImportError:
 
 from utils.fast_utils import compute_gaussian_score_fastgs, sampling_cameras
 
+# SUMO: 导入正则化损失函数
+from utils.loss_4d_utils import E_temp,E_smooth 
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, websockets):
     first_iter = 0
@@ -43,6 +46,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
+
+    # SUMO REG: 构建 KNN 图
+    if dataset.use_reg:
+        gaussians.build_knn_graph(k=4)
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -59,6 +66,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     total_time = 0.0
 
     ema_loss_for_log = 0.0
+    ema_E_temp_for_log = 0.0  # SUMO
+    ema_E_smooth_for_log = 0.0  # SUMO
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
     bg = torch.rand((3), device="cuda") if opt.random_background else background
@@ -104,6 +113,32 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         Ll1 = l1_loss(image, gt_image)
         ssim_value = fast_ssim(image.unsqueeze(0), gt_image.unsqueeze(0))
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+
+        # SUMO REG: 添加时间正则化项和平滑正则化项
+        E_temp_value = 0.0
+        E_smooth_value = 0.0
+
+        if dataset.use_reg:
+            curr_attributes = gaussians.get_gaussian_attributes()
+            prev_attributes = gaussians.get_prev_gaussian_attributes()
+            
+            # 计算时间正则化项 E_temp
+            if hasattr(opt, 'lambda_temp') and opt.lambda_temp > 0:
+                E_temp_value = E_temp(curr_attributes, prev_attributes, alpha=opt.alpha_temp,
+                                      lambdas={"opacity": 10.0, "scaling": 1.0, "features": 10.0})
+                loss += opt.lambda_temp * E_temp_value
+                E_temp_value = E_temp_value.item()
+
+            # 计算平滑正则化项 E_smooth
+            if hasattr(opt, 'lambda_smooth') and opt.lambda_smooth > 0 and gaussians._edge_indices is not None and gaussians._edge_indices.shape[1] > 0:
+                E_smooth_value = E_smooth(curr_attributes, prev_attributes,
+                                          gaussians._edge_indices[0], gaussians._edge_indices[1], 
+                                          alpha=opt.alpha_smooth)
+                loss += opt.lambda_smooth * E_smooth_value
+                E_smooth_value = E_smooth_value.item()
+
+        # SUMO REG END
+
         loss.backward()
 
         iter_end.record()
@@ -111,15 +146,33 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         with torch.no_grad():
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
+            if dataset.use_reg:
+                ema_E_temp_for_log = 0.4 * E_temp_value + 0.6 * ema_E_temp_for_log
+                ema_E_smooth_for_log = 0.4 * E_smooth_value + 0.6 * ema_E_smooth_for_log
+            
             if iteration % 10 == 0:
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"})
+                if dataset.use_reg:
+                    progress_bar.set_postfix({
+                        "Loss": f"{ema_loss_for_log:.{7}f}",
+                        "E_temp": f"{ema_E_temp_for_log:.{7}f}",
+                        "E_smooth": f"{ema_E_smooth_for_log:.{7}f}"
+                    })
+                else:
+                    progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"})
                 progress_bar.update(10)
             if iteration == opt.iterations:
                 progress_bar.close()
 
             iter_time = iter_start.elapsed_time(iter_end)
+            
             # Log and save
-            # training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_time, testing_iterations, scene, render_fastgs, (pipe, background, opt.mult))
+            if tb_writer:
+                tb_writer.add_scalar('train_loss_patches/l1_loss', Ll1.item(), iteration)
+                tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
+                if dataset.use_reg:
+                    tb_writer.add_scalar('train_loss_patches/E_temp', E_temp_value, iteration)
+                    tb_writer.add_scalar('train_loss_patches/E_smooth', E_smooth_value, iteration)
+
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
@@ -151,8 +204,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     gaussians.reset_opacity()
 
             # The multiview consistent pruning of fastgs. We do it every 3k iterations after 15k
-            # In this stage, the model converge basically. So we can prune more aggressively without degrading rendering quality.
-            # You can check the rendering results of 20K iterations in arxiv version (https://arxiv.org/abs/2511.04283), the rendering quality is already very good.
             if iteration % 3000 == 0 and iteration > 15_000 and iteration < 30_000:
                 my_viewpoint_stack = scene.getTrainCameras().copy()
                 camlist = sampling_cameras(my_viewpoint_stack)
@@ -175,9 +226,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             optim_time = optim_start.elapsed_time(optim_end)
             total_time += (iter_time + optim_time) / 1e3
 
+            if (iteration in checkpoint_iterations):
+                print("\n[ITER {}] Saving Checkpoint".format(iteration))
+                torch.save((gaussians.capture(opt.optimizer_type), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
+
     # scene.save(iteration)
     print(f"Gaussian number: {gaussians._xyz.shape[0]}")
     print(f"Training time: {total_time}")
+
+    # 保存最终 checkpoint
+    torch.save((gaussians.capture(opt.optimizer_type), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
     
 def prepare_output_and_logger(args):    
     if not args.model_path:
@@ -261,6 +319,7 @@ if __name__ == "__main__":
     parser.add_argument("--start_checkpoint", type=str, default = None)
     parser.add_argument("--websockets", action='store_true', default=False)
     parser.add_argument("--benchmark_dir", type=str, default=None)
+    
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
     

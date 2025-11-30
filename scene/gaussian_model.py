@@ -581,6 +581,14 @@ class GaussianModel:
         self.prune_points(final_prune)
 
     # ==================== SUMO: 前一帧约束相关方法 ====================
+    def fixup_params(self,spatial_lr_scale : float):
+        self.spatial_lr_scale = spatial_lr_scale
+        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+        # self.exposure_mapping = {cam_info.image_name: idx for idx, cam_info in enumerate(cam_infos)}
+        # self.pretrained_exposures = None
+        # exposure = torch.eye(3, 4, device="cuda")[None].repeat(len(cam_infos), 1, 1)
+        # self._exposure = nn.Parameter(exposure.requires_grad_(True))
+        self.tmp_radii = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
     def build_knn_graph(self, k=4):
         """构建 KNN 图用于时间平滑约束"""
